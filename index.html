@@ -672,10 +672,11 @@
     </div>
 
     <script>
-        const IS_TEST_MODE = false; 
+        const TEST_MODE = 0;
 
         let isSpinning = false;
         let testSpinCount = 0; 
+        let testMode2RarityIndex = 0;
         let config = { sound: true, effects: true };
         let spinCharge = 0;
         let currentLevel = 1; 
@@ -1073,6 +1074,26 @@
             localStorage.setItem('luchik_casino_stats', JSON.stringify(gameStats));
         }
 
+        function isVisualAllAchievementsMode() {
+            return TEST_MODE === 1;
+        }
+
+        function isOnly18Mode() {
+            return TEST_MODE === 2;
+        }
+
+        function isFixedPointsTurboOnlyMode() {
+            return TEST_MODE === 3;
+        }
+
+        function isAntiRepeatDisabledMode() {
+            return TEST_MODE === 4;
+        }
+
+        function isAchievementVisibleUnlocked(achId) {
+            return isVisualAllAchievementsMode() || unlockedAchievements.includes(achId);
+        }
+
         try {
             const savedConfig = localStorage.getItem('luchik_casino_config');
             if (savedConfig) {
@@ -1101,17 +1122,6 @@
 
             const savedNewAchs = localStorage.getItem('luchik_casino_new_achievements');
             if (savedNewAchs) newAchievements = JSON.parse(savedNewAchs);
-
-            if (IS_TEST_MODE) {
-                achievementsData.forEach(ach => {
-                    if (!unlockedAchievements.includes(ach.id)) {
-                        unlockedAchievements.push(ach.id);
-                        newAchievements.push(ach.id);
-                    }
-                });
-                localStorage.setItem('luchik_casino_achievements', JSON.stringify(unlockedAchievements));
-                localStorage.setItem('luchik_casino_new_achievements', JSON.stringify(newAchievements));
-            }
 
             renderAchievements();
         } catch (e) {
@@ -1361,12 +1371,13 @@
         }
 
         function renderAchievements() {
-            document.getElementById('ach-progress').innerText = `Открыто: ${unlockedAchievements.length} / ${achievementsData.length}`;
+            const visibleUnlockedCount = isVisualAllAchievementsMode() ? achievementsData.length : unlockedAchievements.length;
+            document.getElementById('ach-progress').innerText = `Открыто: ${visibleUnlockedCount} / ${achievementsData.length}`;
             const grid = document.getElementById('ach-grid');
             grid.innerHTML = '';
             
             achievementsData.forEach(ach => {
-                const isUnlocked = unlockedAchievements.includes(ach.id);
+                const isUnlocked = isAchievementVisibleUnlocked(ach.id);
                 const card = document.createElement('div');
                 
                 if(isUnlocked) {
@@ -1409,11 +1420,13 @@
             achModal.style.display = 'flex';
         }
 
-        function getWeightedRandomItem(categoryIndex, bypassFatigue) {
-            if (bypassFatigue) return db[categoryIndex][Math.floor(Math.random() * db[categoryIndex].length)];
+        function getWeightedRandomItem(categoryIndex, bypassFatigue, poolOverride) {
+            const sourcePool = (poolOverride && poolOverride.length) ? poolOverride : db[categoryIndex];
+            if (sourcePool.length === 0) return db[categoryIndex][0];
+            if (bypassFatigue || isAntiRepeatDisabledMode()) return sourcePool[Math.floor(Math.random() * sourcePool.length)];
             let totalWeight = 0, weights = [];
-            for (let i = 0; i < db[categoryIndex].length; i++) {
-                let item = db[categoryIndex][i];
+            for (let i = 0; i < sourcePool.length; i++) {
+                let item = sourcePool[i];
                 let weight = 1.0;
                 let appearances = 0;
                 for (let h = 0; h < fatigueHistory[categoryIndex].length; h++) {
@@ -1431,11 +1444,34 @@
                 totalWeight += weight;
             }
             let rand = Math.random() * totalWeight, sum = 0;
-            for (let i = 0; i < db[categoryIndex].length; i++) {
+            for (let i = 0; i < sourcePool.length; i++) {
                 sum += weights[i];
-                if (rand <= sum) return db[categoryIndex][i];
+                if (rand <= sum) return sourcePool[i];
             }
-            return db[categoryIndex][db[categoryIndex].length - 1]; 
+            return sourcePool[sourcePool.length - 1]; 
+        }
+
+        function getMode2Rarity() {
+            const rarityCycle = ['bronze', 'silver', 'gold'];
+            const rarity = rarityCycle[testMode2RarityIndex % rarityCycle.length];
+            testMode2RarityIndex++;
+            return rarity;
+        }
+
+        function generate18PlusCombo(targetRarity) {
+            const pools = [
+                db[0].filter(item => item.tags && item.tags.includes('18+')),
+                db[1].filter(item => item.tags && item.tags.includes('18+')),
+                db[2].filter(item => item.tags && item.tags.includes('18+'))
+            ];
+
+            const items = [
+                getWeightedRandomItem(0, false, pools[0]),
+                getWeightedRandomItem(1, false, pools[1]),
+                getWeightedRandomItem(2, false, pools[2])
+            ];
+
+            return { items, slotColors: [targetRarity, targetRarity, targetRarity] };
         }
 
         function assignColors(family, isPlus, i01, i02, i12) {
@@ -1478,6 +1514,11 @@
         }
 
         function determineSpinOutcome() {
+            if (isOnly18Mode()) {
+                const forcedRarity = getMode2Rarity();
+                const forcedCombo = generate18PlusCombo(forcedRarity);
+                currentSpinState = { finalRarity: forcedRarity, items: forcedCombo.items, slotColors: forcedCombo.slotColors, is18Plus: true };
+            } else {
             let currentBronzeStreak = 0;
             if (gameStats.history.length > 0 && gameStats.history[gameStats.history.length - 1] === 'bronze') {
                 currentBronzeStreak = gameStats.consecRarity;
@@ -1570,24 +1611,28 @@
             }
 
             currentSpinState = { finalRarity, items, slotColors, is18Plus: false };
-
-            for (let c = 0; c < 3; c++) {
-                for (let i = 0; i < db[c].length; i++) {
-                    let tName = db[c][i].t;
-                    if (lastSeen[c][tName] === undefined) lastSeen[c][tName] = 10;
-                    lastSeen[c][tName]++;
-                }
             }
 
-            if (finalRarity !== 'gold' && finalRarity !== 'legendary' && finalRarity !== 'demon') {
-                for (let i = 0; i < 3; i++) {
-                    let pickedName = currentSpinState.items[i].t;
-                    fatigueHistory[i].unshift(pickedName);
-                    if (fatigueHistory[i].length > MAX_HISTORY) fatigueHistory[i].pop();
-                    lastSeen[i][pickedName] = 0; 
+            if (!isAntiRepeatDisabledMode()) {
+                for (let c = 0; c < 3; c++) {
+                    for (let i = 0; i < db[c].length; i++) {
+                        let tName = db[c][i].t;
+                        if (lastSeen[c][tName] === undefined) lastSeen[c][tName] = 10;
+                        lastSeen[c][tName]++;
+                    }
                 }
-            } else {
-                for (let i = 0; i < 3; i++) lastSeen[i][currentSpinState.items[i].t] = 0; 
+
+                const finalRarity = currentSpinState.finalRarity;
+                if (finalRarity !== 'gold' && finalRarity !== 'legendary' && finalRarity !== 'demon') {
+                    for (let i = 0; i < 3; i++) {
+                        let pickedName = currentSpinState.items[i].t;
+                        fatigueHistory[i].unshift(pickedName);
+                        if (fatigueHistory[i].length > MAX_HISTORY) fatigueHistory[i].pop();
+                        lastSeen[i][pickedName] = 0; 
+                    }
+                } else {
+                    for (let i = 0; i < 3; i++) lastSeen[i][currentSpinState.items[i].t] = 0; 
+                }
             }
         }
 
@@ -1866,8 +1911,8 @@
 
             if (!isRouletteActive) {
                 let addedPoints = 0;
-                // Награждаем 45 очками за 18+ режим
-                if (currentSpinState.is18Plus) addedPoints = 45;
+                if (isFixedPointsTurboOnlyMode()) addedPoints = 35;
+                else if (currentSpinState.is18Plus) addedPoints = 45;
                 else if (rarity === 'demon') addedPoints = 100;
                 else if (rarity === 'legendary') addedPoints = 50;
                 else if (rarity === 'gold') addedPoints = 35;
@@ -1919,14 +1964,17 @@
         }
 
         function getRandomBuff() {
-            let totalWeight = buffsList.reduce((sum, b) => sum + b.weight, 0);
+            const availableBuffs = isFixedPointsTurboOnlyMode()
+                ? buffsList.filter(b => b.type === 'turbo')
+                : buffsList;
+            let totalWeight = availableBuffs.reduce((sum, b) => sum + b.weight, 0);
             let rand = Math.random() * totalWeight;
             let currentWeight = 0;
-            for (let buff of buffsList) {
+            for (let buff of availableBuffs) {
                 currentWeight += buff.weight;
                 if (rand <= currentWeight) return buff;
             }
-            return buffsList[buffsList.length - 1];
+            return availableBuffs[availableBuffs.length - 1];
         }
 
         function startInlineRouletteTransition() {
@@ -1984,11 +2032,14 @@
             info.style.opacity = '0';
             
             selectedBuff = getRandomBuff();
-            const baseIndex = buffsList.findIndex(b => b.id === selectedBuff.id);
+            const availableBuffs = isFixedPointsTurboOnlyMode()
+                ? buffsList.filter(b => b.type === 'turbo')
+                : buffsList;
+            const baseIndex = availableBuffs.findIndex(b => b.id === selectedBuff.id);
             
             let trackArray = [];
-            for (let i = 0; i < 6; i++) trackArray = trackArray.concat(buffsList);
-            currentTargetIndex = (buffsList.length * 4) + baseIndex;
+            for (let i = 0; i < 6; i++) trackArray = trackArray.concat(availableBuffs);
+            currentTargetIndex = (availableBuffs.length * 4) + baseIndex;
             
             let trackHtml = '';
             trackArray.forEach((b, idx) => {
